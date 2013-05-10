@@ -25,6 +25,9 @@ from powerhose.client import DEFAULT_TIMEOUT_MOVF
 
 from zmq.eventloop import ioloop, zmqstream
 
+import socket
+import bernhard
+
 
 DEFAULT_MAX_AGE = -1
 DEFAULT_MAX_AGE_DELTA = 0
@@ -152,6 +155,7 @@ class Worker(object):
         self.max_age_delta = max_age_delta
         self.delayed_exit = None
         self.lock = threading.RLock()
+        self.riemann = bernhard.Client()
 
     def _handle_recv_back(self, msg):
         # do the job and send the result
@@ -164,13 +168,19 @@ class Worker(object):
         duration = -1
 
         # results are sent with a PID:OK: or a PID:ERROR prefix
+        riemann_message= {'host': socket.gethostname(), 'service': 'powerhose-worker', 'metric': 1, "state":"ok", "tags" : ["running"]}
+
         try:
             with self.timer.run_job():
+                self.riemann.send(riemann_message)
                 res = target(Job.load_from_string(msg[0]))
 
             # did we timout ?
             if self.timer.timed_out:
                 # let's dump the last
+                riemann_message["state"] = "error"
+                riemann_message["tags"] = ["timeouts"]
+                self.riemann.send(riemann_message)
                 for line in self.timer.last_dump:
                     logger.error(line)
 
@@ -178,6 +188,9 @@ class Worker(object):
                 duration, res = res
             res = '%d:OK:%s' % (self.pid, res)
         except Exception, e:
+            riemann_message["description"] = str(e)
+            riemann_message["state"] = "error"
+            riemann_message["tags"] = ["faults"]
             exc_type, exc_value, exc_traceback = sys.exc_info()
             exc = traceback.format_tb(exc_traceback)
             exc.insert(0, str(e))
@@ -187,6 +200,7 @@ class Worker(object):
         if self.timer.timed_out:
             # let's not send back anything, we know the client
             # is gone anyway
+            self.riemann.send(riemann_message)
             return
 
         if self.debug:
@@ -194,6 +208,9 @@ class Worker(object):
 
         try:
             self._backstream.send(res)
+
+            riemann_message["sending"]
+            self.riemann.send(riemann_message)
         except Exception:
             logging.error("Could not send back the result", exc_info=True)
 
